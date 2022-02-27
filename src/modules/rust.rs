@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde::Deserialize;
@@ -119,26 +120,48 @@ fn execute_rustup_default(context: &Context) -> Option<String> {
         .map(str::to_owned)
 }
 
+// convert a path to a key in rustup `settings.toml`.
+// Mimics rustup:
+// * `settings::Settings::path_to_key`
+// * `utils::utils::canonicalize_path`
+fn path_to_key(path: &Path) -> String {
+    if path.exists() {
+        // allow disallowed method since we want to mimic
+        // rustup exactly.
+        #[allow(clippy::disallowed_methods)]
+        fs::canonicalize(path)
+            .unwrap_or_else(|_| PathBuf::from(path))
+            .display()
+            .to_string()
+    } else {
+        path.display().to_string()
+    }
+}
+
 fn extract_toolchain_from_rustup_override_list(stdout: &str, cwd: &Path) -> Option<String> {
     if stdout == "no overrides\n" {
         return None;
     }
-    // use display version of path, also allows stripping \\?\
-    let cwd = cwd.to_string_lossy();
-    // rustup strips \\?\ prefix
-    #[cfg(windows)]
-    let cwd = cwd.strip_prefix(r"\\?\").unwrap_or(&cwd);
 
-    stdout
+    let overrides: HashMap<String, &str> = stdout
         .lines()
         .filter_map(|line| {
             let (dir, toolchain) = line.split_once('\t')?;
-            Some((dir.trim(), toolchain.trim()))
+            Some((path_to_key(Path::new(dir.trim())), toolchain.trim()))
         })
-        // find most specific match
-        .filter(|(dir, _)| cwd.starts_with(dir))
-        .max_by_key(|(dir, _)| dir.len())
-        .map(|(_, toolchain)| toolchain.to_owned())
+        .collect();
+
+    let mut dir = Some(cwd);
+
+    while let Some(d) = dir {
+        let key = path_to_key(d);
+        if let Some(toolchain) = overrides.get(&*key) {
+            return Some(toolchain.to_string());
+        }
+        dir = d.parent();
+    }
+
+    None
 }
 
 fn find_rust_toolchain_file(context: &Context) -> Option<String> {
@@ -295,6 +318,8 @@ mod tests {
         static OVERRIDES_CWD_B: &str = "/home/user/src/b/tests";
         static OVERRIDES_CWD_C: &str = "/home/user/src/c/examples";
         static OVERRIDES_CWD_D: &str = "/home/user/src/b/d c/spaces";
+        static OVERRIDES_CWD_E: &str = "/home/user/src/b_and_more";
+        static OVERRIDES_CWD_F: &str = "/home/user/src/b";
         assert_eq!(
             extract_toolchain_from_rustup_override_list(OVERRIDES_INPUT, OVERRIDES_CWD_A.as_ref()),
             Some("beta-x86_64-unknown-linux-gnu".to_owned()),
@@ -311,6 +336,14 @@ mod tests {
             extract_toolchain_from_rustup_override_list(OVERRIDES_INPUT, OVERRIDES_CWD_D.as_ref()),
             Some("stable-x86_64-pc-windows-msvc".to_owned()),
         );
+        assert_eq!(
+            extract_toolchain_from_rustup_override_list(OVERRIDES_INPUT, OVERRIDES_CWD_E.as_ref()),
+            None,
+        );
+        assert_eq!(
+            extract_toolchain_from_rustup_override_list(OVERRIDES_INPUT, OVERRIDES_CWD_F.as_ref()),
+            Some("nightly-x86_64-unknown-linux-gnu".to_owned()),
+        );
     }
 
     #[test]
@@ -320,6 +353,8 @@ mod tests {
             "C:\\src                \t                beta-x86_64-unknown-linux-gnu\n";
         static OVERRIDES_CWD_A: &str = r"\\?\C:\src";
         static OVERRIDES_CWD_B: &str = r"C:\src";
+
+        fs::create_dir(OVERRIDES_CWD_B).unwrap();
 
         assert_eq!(
             extract_toolchain_from_rustup_override_list(OVERRIDES_INPUT, OVERRIDES_CWD_A.as_ref()),
