@@ -348,6 +348,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[ignore]
     fn test_extract_toolchain_from_rustup_override_list_win() {
         static OVERRIDES_INPUT: &str =
             "C:\\src                \t                beta-x86_64-unknown-linux-gnu\n";
